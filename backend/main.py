@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # Gemini (production)
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-2.0-flash-lite"
 
     @property
     def origins_list(self) -> list[str]:
