@@ -73,8 +73,8 @@ Both models run **100% locally** via Ollama. No internet connection or API key i
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/SnehaSwarnkar/buildwise.ai.git
-cd buildwise.ai
+git clone https://github.com/shivamojha23/buildwise.git
+cd buildwise
 ```
 
 ### 2. Install and start Ollama
