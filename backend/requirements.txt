@@ -1,0 +1,22 @@
+# BuildWise AI — backend dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework
+fastapi==0.162.0
+uvicorn[standard]==0.54.0          # includes uvloop + watchfiles for --reload
+
+# Request parsing
+python-multipart==0.0.32           # required for UploadFile / Form support
+
+# Data validation
+pydantic==2.14.1
+pydantic-settings==2.16.1          # reads settings from .env via BaseSettings
+
+# Environment variables
+python-dotenv==1.2.4
+
+# AI
+openai==3.37.0
+
+# HTTP client (for future outbound requests / AI calls)
+httpx==0.28.1
