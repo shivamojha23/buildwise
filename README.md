@@ -1,6 +1,8 @@
 # BuildWise AI
 
-An AI-powered construction intelligence platform. The current stage covers project scaffolding, a working FastAPI backend with image upload and validation, and a React frontend dashboard — ready for AI feature integration.
+An AI-powered multimodal construction intelligence platform. It combines a **FastAPI** backend with a **React** frontend, running fully offline using **Ollama** local LLMs — no cloud API keys required.
+
+The platform assists construction professionals with safety monitoring, structural analysis, project planning, property valuation, weather advisory, daily reporting, and an AI assistant — all powered by locally running language models.
 
 ---
 
@@ -9,19 +11,33 @@ An AI-powered construction intelligence platform. The current stage covers proje
 ```
 buildwise-ai/
 ├── backend/
-│   ├── main.py              # FastAPI application
+│   ├── main.py              # FastAPI app — all 7 AI endpoints
 │   ├── requirements.txt     # Pinned Python dependencies
-│   ├── .env                 # Backend environment variables (not committed)
-│   └── .gitignore
+│   ├── .env                 # Backend config (not committed)
+│   ├── .gitignore
+│   └── .venv/               # Python virtual environment (not committed)
 └── frontend/
     ├── src/
-    │   ├── App.jsx           # Main React component / UI
+    │   ├── App.jsx           # Root component + routing
     │   ├── App.css           # Component styles
     │   ├── index.css         # Global styles + Tailwind
+    │   ├── main.jsx          # React entry point
+    │   ├── features/         # One component per AI feature
+    │   │   ├── SafetyMonitoring.jsx
+    │   │   ├── CrackDetection.jsx
+    │   │   ├── ProjectPlanner.jsx
+    │   │   ├── PropertyValuation.jsx
+    │   │   ├── WeatherAdvisory.jsx
+    │   │   ├── DailySiteReport.jsx
+    │   │   └── AIAssistant.jsx
+    │   ├── components/       # Shared UI components
+    │   │   ├── ImageUploader.jsx
+    │   │   ├── ResultCard.jsx
+    │   │   └── Spinner.jsx
     │   └── services/
-    │       └── api.js        # Fetch wrapper for all backend calls
+    │       └── api.js        # Typed fetch wrapper for all endpoints
     ├── public/
-    ├── .env                  # Frontend environment variables (not committed)
+    ├── .env                  # Frontend config (not committed)
     ├── vite.config.js        # Vite + dev-server proxy config
     └── package.json
 ```
@@ -30,24 +46,53 @@ buildwise-ai/
 
 ## Prerequisites
 
-| Tool | Minimum version |
-|------|----------------|
-| Python | 3.11 |
-| Node.js | 18 |
-| npm | 9 |
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Python | 3.11+ | Backend runtime |
+| Node.js | 18+ | Frontend build |
+| npm | 9+ | Frontend package manager |
+| [Ollama](https://ollama.com) | 0.9+ | Local LLM runtime |
+
+---
+
+## AI models used
+
+| Model | Size | Purpose |
+|-------|------|---------|
+| `llama3.2` | 2 GB | Text features — planning, valuation, weather, reports, assistant |
+| `llava:7b` | 4.7 GB | Vision features — safety monitoring, crack detection |
+
+Both models run **100% locally** via Ollama. No internet connection or API key is needed after the initial model download.
+
+> **System requirement:** 16 GB RAM recommended to run both models. 8 GB RAM can run `llama3.2` only (vision features will be limited).
 
 ---
 
 ## Setup
 
-### 1. Clone and enter the project
+### 1. Clone the repository
 
 ```bash
-git clone <repo-url>
-cd buildwise-ai
+git clone https://github.com/SnehaSwarnkar/buildwise.ai.git
+cd buildwise.ai
 ```
 
-### 2. Backend
+### 2. Install and start Ollama
+
+Download from [ollama.com](https://ollama.com/download), then pull the required models:
+
+```bash
+ollama pull llama3.2
+ollama pull llava:7b
+```
+
+Start the Ollama server:
+
+```bash
+ollama serve
+```
+
+### 3. Backend
 
 ```bash
 cd backend
@@ -59,47 +104,42 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
-cp .env .env.local               # or edit .env directly
-# → Fill in OPENAI_API_KEY (required for future AI features)
+# Create the .env file (already configured for Ollama defaults)
+cp .env.example .env             # or create it manually — see Environment variables below
 ```
 
-### 3. Frontend
+### 4. Frontend
 
 ```bash
 cd frontend
-
-# Install dependencies
 npm install
-
-# Configure environment (already has a working default)
-# Edit .env only if your backend runs on a different host/port
 ```
 
 ---
 
 ## Running locally
 
-Open **two terminals**.
+You need **three terminals** running simultaneously.
 
-**Terminal 1 — backend**
+**Terminal 1 — Ollama**
+```bash
+ollama serve
+```
 
+**Terminal 2 — Backend**
 ```bash
 cd backend
 source .venv/bin/activate
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-**Terminal 2 — frontend**
-
+**Terminal 3 — Frontend**
 ```bash
 cd frontend
 npm run dev
 ```
 
-Then open [http://localhost:5173](http://localhost:5173).
-
-The Vite dev server proxies `/api` and `/health` requests to the backend, so there are no CORS issues during development.
+Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ---
 
@@ -107,124 +147,176 @@ The Vite dev server proxies `/api` and `/health` requests to the backend, so the
 
 ### `backend/.env`
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `APP_HOST` | `127.0.0.1` | Host the uvicorn server binds to |
-| `APP_PORT` | `8000` | Port the uvicorn server listens on |
-| `APP_RELOAD` | `true` | Enable hot-reload (disable in production) |
-| `ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated list of allowed CORS origins |
-| `OPENAI_API_KEY` | _(empty)_ | OpenAI API key — required for AI features |
-| `MAX_IMAGE_SIZE_MB` | `10` | Maximum accepted image upload size in MB |
+```env
+# Server
+APP_HOST=127.0.0.1
+APP_PORT=8000
+APP_RELOAD=true
+
+# CORS — comma-separated allowed frontend origins
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+
+# Ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_TEXT_MODEL=llama3.2
+OLLAMA_VISION_MODEL=llava:7b
+
+# Upload limits
+MAX_IMAGE_SIZE_MB=10
+```
 
 ### `frontend/.env`
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VITE_API_BASE_URL` | `http://127.0.0.1:8000` | Backend base URL used by the API client |
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
 
-> **Never commit `.env` files containing real secrets.** Both `.gitignore` files already exclude them.
+> Neither `.env` file is committed to the repository. Create them locally from the examples above.
 
 ---
 
 ## API reference
 
-Interactive docs are available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) when the backend is running.
-
-### `GET /`
-Returns a welcome message and links to docs and health endpoints.
+Interactive docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
 ### `GET /health`
-Returns server health status and UTC timestamp.
+Returns server and Ollama connectivity status.
 
 ```json
 {
   "status": "healthy",
   "application": "BuildWise AI",
-  "timestamp": "2026-10-24T10:00:00Z"
+  "timestamp": "2026-10-24T10:00:00Z",
+  "ai_ready": true,
+  "text_model": "llama3.2",
+  "vision_model": "llava:7b"
 }
 ```
 
 ### `GET /api/features`
-Returns the list of platform features and their current availability status.
-
-```json
-{
-  "features": [
-    { "id": "safety",    "name": "Safety Monitoring",        "status": "available" },
-    { "id": "cracks",    "name": "Crack Detection",           "status": "planned"   },
-    { "id": "planning",  "name": "Project Planner",           "status": "planned"   },
-    { "id": "valuation", "name": "Property Valuation",        "status": "planned"   },
-    { "id": "weather",   "name": "Weather Advisory",          "status": "planned"   },
-    { "id": "reports",   "name": "Daily Site Reports",        "status": "planned"   },
-    { "id": "assistant", "name": "AI Construction Assistant", "status": "planned"   }
-  ]
-}
-```
+Returns the list of all platform features.
 
 ### `POST /api/safety/analyze`
-Accepts a construction-site image and validates it. AI hazard detection is not yet wired in — this endpoint confirms the upload pipeline is working end-to-end.
+Analyzes a construction site image for hazards and PPE compliance.
 
-**Request** — `multipart/form-data`
+| Field | Type | Required |
+|-------|------|----------|
+| `file` | Image (JPG/PNG/WEBP, max 10 MB) | ✅ |
+| `context` | Text description of the site | optional |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `file` | `File` | Image to analyse. JPG, PNG, or WEBP. Max 10 MB. |
+### `POST /api/cracks/analyze`
+Detects and classifies structural cracks in an image.
 
-**Success response — `200 OK`**
+| Field | Type | Required |
+|-------|------|----------|
+| `file` | Image (JPG/PNG/WEBP, max 10 MB) | ✅ |
+| `context` | Additional structural context | optional |
 
-```json
-{
-  "success": true,
-  "filename": "site-photo.jpg",
-  "size_bytes": 204800,
-  "status": "uploaded",
-  "analysis_complete": false,
-  "message": "Image uploaded and validated successfully. AI hazard detection has not been configured yet."
-}
-```
+### `POST /api/planning/generate`
+Generates a construction project plan with timeline, phases, and material estimates.
 
-**Error responses**
+| Field | Type | Required |
+|-------|------|----------|
+| `project_type` | string | ✅ |
+| `area_sqft` | number | ✅ |
+| `location` | string | optional |
+| `budget_usd` | number | optional |
+| `description` | string | optional |
+
+### `POST /api/valuation/estimate`
+Estimates property value based on attributes and location.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `property_type` | string | ✅ |
+| `area_sqft` | number | ✅ |
+| `location` | string | ✅ |
+| `bedrooms` | number | optional |
+| `bathrooms` | number | optional |
+| `year_built` | number | optional |
+| `condition` | poor/fair/good/excellent/new | optional |
+| `amenities` | string | optional |
+
+### `POST /api/weather/advisory`
+Generates a weather-aware advisory for planned construction activities.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `location` | string | ✅ |
+| `activities` | string | optional |
+| `date_range` | string | optional |
+
+### `POST /api/reports/generate`
+Auto-generates a structured daily site progress report.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `site_name` | string | ✅ |
+| `date` | YYYY-MM-DD | ✅ |
+| `file` | Site photo (optional) | optional |
+| `activities_completed` | string | optional |
+| `workers_present` | number | optional |
+| `equipment_used` | string | optional |
+| `issues` | string | optional |
+| `notes` | string | optional |
+
+### `POST /api/assistant/ask`
+Answers construction-related questions with AI expertise.
+
+| Field | Type | Required |
+|-------|------|----------|
+| `question` | string | ✅ |
+| `context` | Project context string | optional |
+
+**Error responses (all endpoints)**
 
 | Status | Cause |
 |--------|-------|
-| `400` | Empty file or content does not match declared format |
-| `413` | File exceeds the 10 MB limit |
-| `415` | Unsupported file type (not JPG / PNG / WEBP) |
+| `400` | Empty or malformed file |
+| `413` | File exceeds 10 MB |
+| `415` | Unsupported image format |
+| `503` | Ollama is not running |
+| `504` | Ollama response timeout |
+| `502` | Model returned unreadable output |
 | `500` | Unexpected server error |
 
 ---
 
 ## Tech stack
 
-| Layer | Technology |
-|-------|-----------|
-| Backend framework | [FastAPI](https://fastapi.tiangolo.com) 0.162 |
-| ASGI server | [Uvicorn](https://www.uvicorn.org) 0.54 |
-| Data validation | [Pydantic v2](https://docs.pydantic.dev) + pydantic-settings |
-| Frontend framework | [React](https://react.dev) 19 |
-| Build tool | [Vite](https://vitejs.dev) 8 |
-| Styling | [Tailwind CSS](https://tailwindcss.com) v4 |
-| AI (planned) | [OpenAI](https://platform.openai.com/docs) |
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Backend framework | [FastAPI](https://fastapi.tiangolo.com) | 0.162 |
+| ASGI server | [Uvicorn](https://www.uvicorn.org) | 0.54 |
+| Data validation | [Pydantic v2](https://docs.pydantic.dev) + pydantic-settings | 2.14 |
+| HTTP client | [httpx](https://www.python-httpx.org) | 0.28 |
+| Local AI runtime | [Ollama](https://ollama.com) | 0.9+ |
+| Text model | [Llama 3.2](https://ollama.com/library/llama3.2) | 3.2B |
+| Vision model | [LLaVA](https://ollama.com/library/llava) | 7B |
+| Frontend framework | [React](https://react.dev) | 19 |
+| Build tool | [Vite](https://vitejs.dev) | 8 |
+| Styling | [Tailwind CSS](https://tailwindcss.com) | v4 |
 
 ---
 
-## Features — current status
+## Features
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Safety Monitoring | **Upload ready** | Image upload + validation working. AI analysis not yet integrated. |
-| Crack Detection | Planned | — |
-| Project Planner | Planned | — |
-| Property Valuation | Planned | — |
-| Weather Advisory | Planned | — |
-| Daily Site Reports | Planned | — |
-| AI Construction Assistant | Planned | — |
+| Feature | AI model | Input | Status |
+|---------|----------|-------|--------|
+| Safety Monitoring | LLaVA 7B (vision) | Site image | ✅ Live |
+| Crack Detection | LLaVA 7B (vision) | Structure image | ✅ Live |
+| Project Planner | Llama 3.2 (text) | Project details | ✅ Live |
+| Property Valuation | Llama 3.2 (text) | Property details | ✅ Live |
+| Weather Advisory | Llama 3.2 (text) | Location + activities | ✅ Live |
+| Daily Site Reports | Llama 3.2 + LLaVA | Form + optional photo | ✅ Live |
+| AI Construction Assistant | Llama 3.2 (text) | Free-text question | ✅ Live |
 
 ---
 
-## Development notes
+## Known limitations
 
-- The backend reads all config from `.env` via `pydantic-settings`. No values are hardcoded — change `.env` and restart to reconfigure.
-- The frontend reads `VITE_API_BASE_URL` at build time. After changing `.env` in the frontend directory, restart `npm run dev`.
-- The Vite proxy (`/api`, `/health`) is active **only in development**. In production, configure your reverse proxy (nginx, etc.) to route these paths to the backend.
-- FastAPI's automatic docs (`/docs`) reflect the live API schema and are the fastest way to test endpoints manually.
+- **Vision accuracy** — LLaVA 7B is a smaller model. For production use, a larger vision model (e.g. LLaVA 13B or 34B) will give significantly more accurate results.
+- **Response time** — Local inference is slower than cloud APIs. Text responses take 5–15 seconds; vision responses 15–45 seconds depending on hardware.
+- **JSON reliability** — Smaller models occasionally produce malformed JSON. The backend includes a fallback parser, but complex queries may fail. Retrying usually succeeds.
+- **No real-time weather data** — The weather advisory uses the model's training knowledge of typical weather patterns, not live forecast data.
+- **Valuation estimates** — Property valuations are AI-generated estimates based on general market knowledge, not live real estate data. Do not use for financial decisions.

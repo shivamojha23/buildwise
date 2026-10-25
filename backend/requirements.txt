@@ -3,20 +3,17 @@
 
 # Web framework
 fastapi==0.162.0
-uvicorn[standard]==0.54.0          # includes uvloop + watchfiles for --reload
+uvicorn[standard]==0.54.0
 
 # Request parsing
-python-multipart==0.0.32           # required for UploadFile / Form support
+python-multipart==0.0.32
 
 # Data validation
 pydantic==2.14.1
-pydantic-settings==2.16.1          # reads settings from .env via BaseSettings
+pydantic-settings==2.16.1
 
 # Environment variables
 python-dotenv==1.2.4
 
-# AI
-openai==3.37.0
-
-# HTTP client (for future outbound requests / AI calls)
+# HTTP client — used to talk to Ollama
 httpx==0.28.1

@@ -1,6 +1,6 @@
 """
 BuildWise AI — FastAPI backend
-Multimodal construction intelligence platform.
+Multimodal construction intelligence platform powered by Ollama (local LLM).
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,9 +32,12 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_reload: bool = False
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
     max_image_size_mb: int = 10
+
+    # Ollama
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_text_model: str = "llama3.2"
+    ollama_vision_model: str = "llava:7b"
 
     @property
     def origins_list(self) -> list[str]:
@@ -55,15 +58,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("buildwise")
 
-# ── OpenAI client ─────────────────────────────────────────────────────────────
-
-ai = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="BuildWise AI API",
-    description="AI-powered multimodal construction intelligence platform",
+    description="AI-powered multimodal construction intelligence platform (Ollama)",
     version="2.0.0",
 )
 
@@ -75,6 +75,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ── Global error handler ──────────────────────────────────────────────────────
 
 @app.exception_handler(Exception)
@@ -85,15 +86,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         content={"detail": "An internal server error occurred. Please try again later."},
     )
 
+
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    ai_ready = bool(settings.openai_api_key)
+    ok = await check_ollama_health()
     logger.info(
-        "BuildWise AI started — host=%s port=%d ai_ready=%s model=%s",
-        settings.app_host, settings.app_port, ai_ready, settings.openai_model,
+        "BuildWise AI started — ollama=%s text_model=%s vision_model=%s",
+        "reachable" if ok else "UNREACHABLE",
+        settings.ollama_text_model,
+        settings.ollama_vision_model,
     )
+
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
@@ -106,10 +111,96 @@ MAX_IMAGE_SIZE = settings.max_image_size_bytes
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
-# ── Shared helpers ────────────────────────────────────────────────────────────
+# ── Ollama helpers ────────────────────────────────────────────────────────────
+
+async def check_ollama_health() -> bool:
+    """Return True if Ollama is reachable."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{settings.ollama_base_url}/api/tags")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def ollama_chat(
+    prompt: str,
+    system: str,
+    image_b64: str | None = None,
+    use_vision: bool = False,
+) -> dict[str, Any]:
+    """
+    Call Ollama /api/generate and parse the JSON response from the model.
+    Uses the vision model when an image is provided, text model otherwise.
+    """
+    model = settings.ollama_vision_model if use_vision else settings.ollama_text_model
+
+    full_prompt = f"{system}\n\n{prompt}"
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": False,
+        "format": "json",          # ask Ollama to enforce JSON output
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 2048,
+        },
+    }
+
+    if image_b64:
+        payload["images"] = [image_b64]
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{settings.ollama_base_url}/api/generate",
+                json=payload,
+            )
+            response.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot reach Ollama. Make sure it is running: run `ollama serve` "
+                "in a terminal."
+            ),
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ollama returned an error: {exc.response.status_code}",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Ollama took too long to respond. Try a shorter prompt or a faster model.",
+        )
+
+    raw = response.json().get("response", "{}")
+    logger.debug("Ollama raw response: %s", raw[:300])
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Model returned text instead of JSON — try to extract a JSON block
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                return json.loads(raw[start:end])
+            except json.JSONDecodeError:
+                pass
+        logger.error("Could not parse JSON from model response: %s", raw[:500])
+        raise HTTPException(
+            status_code=502,
+            detail="The AI model returned an unreadable response. Try again.",
+        )
+
+
+# ── Image helpers ─────────────────────────────────────────────────────────────
 
 async def read_and_validate_image(file: UploadFile) -> bytes:
-    """Read, size-check, and magic-byte validate an uploaded image. Returns raw bytes."""
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=415,
@@ -141,50 +232,8 @@ async def read_and_validate_image(file: UploadFile) -> bytes:
     return data
 
 
-def image_to_data_url(data: bytes, content_type: str) -> str:
-    return f"data:{content_type};base64,{base64.b64encode(data).decode()}"
-
-
-def require_ai() -> OpenAI:
-    if ai is None:
-        raise HTTPException(
-            status_code=503,
-            detail="AI service is not configured. Set OPENAI_API_KEY in backend/.env.",
-        )
-    return ai
-
-
-def call_ai_json(client: OpenAI, system: str, user_text: str,
-                 image_url: str | None = None) -> dict[str, Any]:
-    """Call OpenAI and parse the JSON response. Raises HTTPException on failure."""
-    messages: list[dict] = [{"role": "system", "content": system}]
-
-    if image_url:
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
-                {"type": "text", "text": user_text},
-            ],
-        })
-    else:
-        messages.append({"role": "user", "content": user_text})
-
-    try:
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.2,
-        )
-        raw = response.choices[0].message.content or "{}"
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.error("AI returned invalid JSON: %s", exc)
-        raise HTTPException(status_code=502, detail="AI returned an unreadable response.")
-    except Exception as exc:
-        logger.exception("OpenAI call failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"AI service error: {exc}")
+def to_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
 
 
 # ── Response models ───────────────────────────────────────────────────────────
@@ -194,11 +243,13 @@ class HealthResponse(BaseModel):
     application: str
     timestamp: datetime
     ai_ready: bool
+    text_model: str
+    vision_model: str
 
 
 class Hazard(BaseModel):
     type: str
-    severity: str          # low | medium | high | critical
+    severity: str
     location: str
     description: str
     recommendation: str
@@ -296,16 +347,20 @@ def root():
         "documentation": "/docs",
         "health": "/health",
         "version": "2.0.0",
+        "ai_backend": "Ollama (local)",
     }
 
 
 @app.get("/health", response_model=HealthResponse)
-def health_check():
+async def health_check():
+    ai_ready = await check_ollama_health()
     return HealthResponse(
         status="healthy",
         application="BuildWise AI",
         timestamp=datetime.now(timezone.utc),
-        ai_ready=ai is not None,
+        ai_ready=ai_ready,
+        text_model=settings.ollama_text_model,
+        vision_model=settings.ollama_vision_model,
     )
 
 
@@ -331,41 +386,39 @@ async def analyze_safety(
     file: UploadFile = File(...),
     context: str = Form(default=""),
 ):
-    """Analyze a construction site image for safety hazards and PPE compliance."""
-    client = require_ai()
     data = await read_and_validate_image(file)
-    image_url = image_to_data_url(data, file.content_type or "image/jpeg")
 
-    system = """You are a certified construction safety engineer with expertise in OSHA standards.
-Analyze the provided construction site image and return a JSON object with this exact schema:
+    system = """You are a certified construction safety engineer with OSHA expertise.
+Analyze the construction site image and return ONLY a valid JSON object with this exact structure:
 {
-  "overall_risk_level": "low|medium|high|critical",
+  "overall_risk_level": "low or medium or high or critical",
   "hazards": [
     {
-      "type": "string",
-      "severity": "low|medium|high|critical",
-      "location": "string describing where in the image",
-      "description": "string",
-      "recommendation": "string"
+      "type": "hazard type name",
+      "severity": "low or medium or high or critical",
+      "location": "where in the image",
+      "description": "what the hazard is",
+      "recommendation": "how to fix it"
     }
   ],
-  "ppe_compliance": "compliant|partial|non-compliant|not-visible",
-  "immediate_actions": ["string"],
-  "summary": "string (2-3 sentences)"
+  "ppe_compliance": "compliant or partial or non-compliant or not-visible",
+  "immediate_actions": ["action 1", "action 2"],
+  "summary": "2-3 sentence overall assessment"
 }
-Return ONLY valid JSON, no markdown."""
+Return ONLY the JSON object, no other text."""
 
-    user = f"Analyze this construction site image for safety hazards.{' Additional context: ' + context if context else ''}"
-    result = call_ai_json(client, system, user, image_url)
+    prompt = f"Analyze this construction site image for safety hazards.{' Context: ' + context if context else ''}"
 
-    # Ensure required keys exist with safe defaults
+    result = await ollama_chat(system=system, prompt=prompt,
+                               image_b64=to_b64(data), use_vision=True)
+
     result.setdefault("overall_risk_level", "unknown")
     result.setdefault("hazards", [])
     result.setdefault("ppe_compliance", "not-visible")
     result.setdefault("immediate_actions", [])
     result.setdefault("summary", "Analysis complete.")
 
-    logger.info("Safety analysis done — risk=%s hazards=%d", result["overall_risk_level"], len(result["hazards"]))
+    logger.info("Safety analysis — risk=%s hazards=%d", result["overall_risk_level"], len(result["hazards"]))
     return result
 
 
@@ -376,33 +429,32 @@ async def analyze_cracks(
     file: UploadFile = File(...),
     context: str = Form(default=""),
 ):
-    """Detect and classify structural cracks from a site image."""
-    client = require_ai()
     data = await read_and_validate_image(file)
-    image_url = image_to_data_url(data, file.content_type or "image/jpeg")
 
-    system = """You are a structural engineer specializing in crack analysis and building diagnostics.
-Analyze the image and return JSON with this exact schema:
+    system = """You are a structural engineer specializing in crack analysis.
+Analyze the image and return ONLY a valid JSON object:
 {
-  "crack_detected": true|false,
-  "overall_severity": "none|hairline|minor|moderate|severe|critical",
-  "structural_risk": "none|low|medium|high|immediate",
+  "crack_detected": true or false,
+  "overall_severity": "none or hairline or minor or moderate or severe or critical",
+  "structural_risk": "none or low or medium or high or immediate",
   "cracks": [
     {
-      "type": "string (e.g. hairline, structural, settlement)",
-      "severity": "string",
-      "location": "string",
-      "probable_cause": "string",
-      "recommended_action": "string"
+      "type": "crack type (e.g. hairline, structural, settlement)",
+      "severity": "severity level",
+      "location": "where in the image",
+      "probable_cause": "likely cause",
+      "recommended_action": "what to do"
     }
   ],
-  "immediate_action_required": true|false,
-  "summary": "string"
+  "immediate_action_required": true or false,
+  "summary": "overall assessment"
 }
-Return ONLY valid JSON."""
+Return ONLY the JSON object."""
 
-    user = f"Analyze this image for structural cracks.{' Context: ' + context if context else ''}"
-    result = call_ai_json(client, system, user, image_url)
+    prompt = f"Analyze this image for structural cracks.{' Context: ' + context if context else ''}"
+
+    result = await ollama_chat(system=system, prompt=prompt,
+                               image_b64=to_b64(data), use_vision=True)
 
     result.setdefault("crack_detected", False)
     result.setdefault("overall_severity", "none")
@@ -411,7 +463,7 @@ Return ONLY valid JSON."""
     result.setdefault("immediate_action_required", False)
     result.setdefault("summary", "Analysis complete.")
 
-    logger.info("Crack analysis done — detected=%s severity=%s", result["crack_detected"], result["overall_severity"])
+    logger.info("Crack analysis — detected=%s severity=%s", result["crack_detected"], result["overall_severity"])
     return result
 
 
@@ -425,35 +477,43 @@ async def generate_plan(
     budget_usd: float = Form(default=0),
     description: str = Form(default=""),
 ):
-    """Generate a construction project plan with timeline, materials, and cost estimates."""
-    client = require_ai()
-
     system = """You are a senior construction project manager with 20 years of experience.
-Generate a detailed project plan and return JSON with this exact schema:
+Return ONLY a valid JSON object with this structure:
 {
-  "project_type": "string",
-  "estimated_duration_weeks": integer,
+  "project_type": "project name",
+  "estimated_duration_weeks": 12,
   "phases": [
-    {"phase": "string", "duration_weeks": integer, "activities": ["string"], "dependencies": ["string"]}
+    {
+      "phase": "phase name",
+      "duration_weeks": 2,
+      "activities": ["activity 1", "activity 2"],
+      "dependencies": ["dependency"]
+    }
   ],
   "materials": [
-    {"material": "string", "quantity": number, "unit": "string", "estimated_cost_usd": number}
+    {
+      "material": "material name",
+      "quantity": 100,
+      "unit": "bags",
+      "estimated_cost_usd": 500
+    }
   ],
-  "total_estimated_cost_usd": number,
-  "key_risks": ["string"],
-  "summary": "string"
+  "total_estimated_cost_usd": 150000,
+  "key_risks": ["risk 1", "risk 2"],
+  "summary": "project overview"
 }
-Return ONLY valid JSON."""
+Return ONLY the JSON object."""
 
-    user = (
+    prompt = (
+        f"Generate a detailed construction plan for:\n"
         f"Project: {project_type}\n"
         f"Area: {area_sqft} sq ft\n"
         f"Location: {location or 'not specified'}\n"
         f"Budget: {'$' + str(budget_usd) if budget_usd else 'not specified'}\n"
-        f"Description: {description or 'standard construction'}\n"
-        "Generate a detailed construction plan."
+        f"Description: {description or 'standard construction'}"
     )
-    result = call_ai_json(client, system, user)
+
+    result = await ollama_chat(system=system, prompt=prompt)
 
     result.setdefault("project_type", project_type)
     result.setdefault("estimated_duration_weeks", 0)
@@ -463,7 +523,7 @@ Return ONLY valid JSON."""
     result.setdefault("key_risks", [])
     result.setdefault("summary", "Plan generated.")
 
-    logger.info("Project plan generated — type=%s duration=%s weeks", result["project_type"], result["estimated_duration_weeks"])
+    logger.info("Plan generated — type=%s duration=%s weeks", result["project_type"], result["estimated_duration_weeks"])
     return result
 
 
@@ -480,33 +540,28 @@ async def estimate_valuation(
     condition: str = Form(default="good"),
     amenities: str = Form(default=""),
 ):
-    """Estimate property valuation based on key attributes."""
-    client = require_ai()
-
-    system = """You are a certified real estate appraiser with expertise in construction and property valuation.
-Analyze the property details and return JSON with this exact schema:
+    system = """You are a certified real estate appraiser.
+Return ONLY a valid JSON object:
 {
-  "estimated_value_usd": number,
-  "price_per_sqft_usd": number,
-  "market_trend": "declining|stable|appreciating|hot",
-  "confidence_level": "low|medium|high",
-  "value_drivers": ["string"],
-  "comparable_range_usd": {"low": number, "mid": number, "high": number},
-  "summary": "string"
+  "estimated_value_usd": 350000,
+  "price_per_sqft_usd": 175,
+  "market_trend": "stable or declining or appreciating or hot",
+  "confidence_level": "low or medium or high",
+  "value_drivers": ["driver 1", "driver 2"],
+  "comparable_range_usd": {"low": 300000, "mid": 350000, "high": 400000},
+  "summary": "valuation summary"
 }
-Return ONLY valid JSON."""
+Return ONLY the JSON object."""
 
-    user = (
-        f"Property type: {property_type}\n"
-        f"Area: {area_sqft} sq ft\n"
-        f"Location: {location}\n"
+    prompt = (
+        f"Estimate property value:\n"
+        f"Type: {property_type}\nArea: {area_sqft} sq ft\nLocation: {location}\n"
         f"Bedrooms: {bedrooms}, Bathrooms: {bathrooms}\n"
-        f"Year built: {year_built or 'unknown'}\n"
-        f"Condition: {condition}\n"
-        f"Amenities: {amenities or 'standard'}\n"
-        "Provide a detailed property valuation."
+        f"Year built: {year_built or 'unknown'}, Condition: {condition}\n"
+        f"Amenities: {amenities or 'standard'}"
     )
-    result = call_ai_json(client, system, user)
+
+    result = await ollama_chat(system=system, prompt=prompt)
 
     result.setdefault("estimated_value_usd", 0)
     result.setdefault("price_per_sqft_usd", 0)
@@ -516,7 +571,7 @@ Return ONLY valid JSON."""
     result.setdefault("comparable_range_usd", {"low": 0, "mid": 0, "high": 0})
     result.setdefault("summary", "Valuation complete.")
 
-    logger.info("Valuation done — value=$%s location=%s", result["estimated_value_usd"], location)
+    logger.info("Valuation done — $%s for %s", result["estimated_value_usd"], location)
     return result
 
 
@@ -528,29 +583,27 @@ async def weather_advisory(
     activities: str = Form(default="general construction"),
     date_range: str = Form(default="next 7 days"),
 ):
-    """Generate weather-aware construction site advisory."""
-    client = require_ai()
-
     system = """You are a construction weather risk specialist.
-Based on the location and planned activities, generate a weather advisory and return JSON with this exact schema:
+Return ONLY a valid JSON object:
 {
-  "location": "string",
-  "current_conditions": "string",
-  "risk_level": "low|medium|high|extreme",
-  "affected_activities": ["string"],
-  "recommendations": ["string"],
-  "work_safe_window": "string",
-  "summary": "string"
+  "location": "city name",
+  "current_conditions": "description of typical weather",
+  "risk_level": "low or medium or high or extreme",
+  "affected_activities": ["activity 1", "activity 2"],
+  "recommendations": ["recommendation 1", "recommendation 2"],
+  "work_safe_window": "e.g. 6 AM to 2 PM on clear days",
+  "summary": "advisory summary"
 }
-Use your knowledge of typical weather patterns for the location and season. Return ONLY valid JSON."""
+Return ONLY the JSON object."""
 
-    user = (
+    prompt = (
+        f"Generate a construction weather advisory:\n"
         f"Location: {location}\n"
-        f"Planned activities: {activities}\n"
-        f"Period: {date_range}\n"
-        "Generate a weather advisory for construction work."
+        f"Activities: {activities}\n"
+        f"Period: {date_range}"
     )
-    result = call_ai_json(client, system, user)
+
+    result = await ollama_chat(system=system, prompt=prompt)
 
     result.setdefault("location", location)
     result.setdefault("current_conditions", "unknown")
@@ -560,7 +613,7 @@ Use your knowledge of typical weather patterns for the location and season. Retu
     result.setdefault("work_safe_window", "To be determined")
     result.setdefault("summary", "Advisory generated.")
 
-    logger.info("Weather advisory done — location=%s risk=%s", location, result["risk_level"])
+    logger.info("Weather advisory — location=%s risk=%s", location, result["risk_level"])
     return result
 
 
@@ -577,40 +630,43 @@ async def generate_report(
     issues: str = Form(default=""),
     notes: str = Form(default=""),
 ):
-    """Generate a daily site progress report, optionally with a site image."""
-    client = require_ai()
-
-    image_url = None
+    image_b64 = None
+    use_vision = False
     if file and file.filename:
-        data = await read_and_validate_image(file)
-        image_url = image_to_data_url(data, file.content_type or "image/jpeg")
+        image_data = await read_and_validate_image(file)
+        image_b64 = to_b64(image_data)
+        use_vision = True
 
-    system = """You are a construction site manager generating a formal daily progress report.
-Return JSON with this exact schema:
+    system = """You are a construction site manager generating a formal daily report.
+Return ONLY a valid JSON object:
 {
-  "date": "string",
-  "site_name": "string",
-  "overall_progress": "behind-schedule|on-schedule|ahead-of-schedule",
+  "date": "YYYY-MM-DD",
+  "site_name": "site name",
+  "overall_progress": "behind-schedule or on-schedule or ahead-of-schedule",
   "sections": [
-    {"section": "string", "content": "string"}
+    {"section": "Work Completed", "content": "details"},
+    {"section": "Workforce", "content": "details"},
+    {"section": "Equipment", "content": "details"},
+    {"section": "Safety Observations", "content": "details"},
+    {"section": "Materials", "content": "details"},
+    {"section": "Weather Impact", "content": "details"}
   ],
-  "issues_flagged": ["string"],
-  "next_day_plan": "string",
-  "summary": "string"
+  "issues_flagged": ["issue 1"],
+  "next_day_plan": "plan for tomorrow",
+  "summary": "brief overall summary"
 }
-Sections should include: Work Completed, Workforce, Equipment, Safety Observations, Materials, Weather Impact.
-Return ONLY valid JSON."""
+Return ONLY the JSON object."""
 
-    user = (
-        f"Site: {site_name}\nDate: {date}\n"
-        f"Activities completed: {activities_completed or 'not specified'}\n"
-        f"Workers present: {workers_present}\n"
-        f"Equipment used: {equipment_used or 'not specified'}\n"
-        f"Issues: {issues or 'none reported'}\n"
-        f"Notes: {notes or 'none'}\n"
-        "Generate a professional daily site report."
+    prompt = (
+        f"Generate a daily site report:\n"
+        f"Site: {site_name}, Date: {date}\n"
+        f"Activities: {activities_completed or 'not specified'}\n"
+        f"Workers: {workers_present}, Equipment: {equipment_used or 'not specified'}\n"
+        f"Issues: {issues or 'none'}, Notes: {notes or 'none'}"
     )
-    result = call_ai_json(client, system, user, image_url)
+
+    result = await ollama_chat(system=system, prompt=prompt,
+                               image_b64=image_b64, use_vision=use_vision)
 
     result.setdefault("date", date)
     result.setdefault("site_name", site_name)
@@ -620,7 +676,7 @@ Return ONLY valid JSON."""
     result.setdefault("next_day_plan", "Continue scheduled activities.")
     result.setdefault("summary", "Report generated.")
 
-    logger.info("Daily report generated — site=%s date=%s", site_name, date)
+    logger.info("Report generated — site=%s date=%s", site_name, date)
     return result
 
 
@@ -631,33 +687,35 @@ async def ask_assistant(
     question: str = Form(...),
     context: str = Form(default=""),
 ):
-    """Answer construction-related questions with AI expertise."""
-    client = require_ai()
-
     system = """You are an expert AI construction assistant with deep knowledge in:
 - Construction engineering and structural design
-- Building codes and safety regulations (OSHA, IBC, ACI, AISC)
+- Building codes and safety (OSHA, IBC, ACI, AISC)
 - Materials science and cost estimation
 - Project management and scheduling
 - Real estate and property valuation
 
-Return JSON with this exact schema:
+Return ONLY a valid JSON object:
 {
-  "answer": "string (detailed, professional answer)",
-  "follow_up_suggestions": ["string (3 related questions the user might want to ask)"],
-  "references": ["string (relevant standards, codes, or resources)"]
+  "answer": "detailed professional answer here",
+  "follow_up_suggestions": [
+    "related question 1?",
+    "related question 2?",
+    "related question 3?"
+  ],
+  "references": ["OSHA standard or code reference", "another reference"]
 }
-Return ONLY valid JSON."""
+Return ONLY the JSON object."""
 
-    user = (
+    prompt = (
         f"Question: {question}"
         + (f"\nProject context: {context}" if context else "")
     )
-    result = call_ai_json(client, system, user)
+
+    result = await ollama_chat(system=system, prompt=prompt)
 
     result.setdefault("answer", "No answer generated.")
     result.setdefault("follow_up_suggestions", [])
     result.setdefault("references", [])
 
-    logger.info("Assistant answered question (%d chars)", len(question))
+    logger.info("Assistant answered — question length=%d chars", len(question))
     return result
